@@ -10,7 +10,7 @@ extern crate serde_derive;
 #[macro_use]
 extern crate quickcheck;
 
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -62,6 +62,8 @@ Options:
     --improvements       Show only improvements.
     --regressions        Show only regressions.
     --color <when>       Show colored rows: never, always or auto [default: auto]
+    --merge              Instead of printing comparison, print the faster one
+                         of each result.
 "#;
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +77,7 @@ struct Args {
     flag_improvements: bool,
     flag_regressions: bool,
     flag_color: When,
+    flag_merge: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,79 +102,93 @@ impl Args {
         let (name_old, name_new) = Args::names(&self.arg_old, &self.arg_new);
         let benches = try!(self.parse_benchmarks()).paired();
         if benches.comparisons().len() > 0 {
-            let mut output = Table::new();
-            output.set_format(*format::consts::FORMAT_CLEAN);
-            output.add_row(row![
-                b->"name",
-                b->format!("{} ns/iter", name_old),
-                b->format!("{} ns/iter", name_new),
-                br->"diff ns/iter",
-                br->"diff %",
-                br->"speedup"
-            ]);
-            for c in benches.comparisons() {
-                let abs_per = (c.diff_ratio * 100f64).abs().trunc() as u8;
-                let regression = c.diff_ns > 0;
-                if self.flag_threshold.map_or(false, |t| abs_per < t) ||
-                   self.flag_regressions && !regression ||
-                   self.flag_improvements && regression {
-                    continue;
-                }
-                output.add_row(c.to_row(self.flag_variance, regression));
-            }
-
-            if self.flag_include_missing {
-                for b in benches.missing_old() {
-                    output.add_row(row![b.name, b.fmt_ns(self.flag_variance), "n/a", r->"n/a", r->"n/a"]);
-                }
-
-                for b in benches.missing_new() {
-                    output.add_row(row![b.name, "n/a", b.fmt_ns(self.flag_variance), r->"n/a", r->"n/a"]);
-                }
-            }
-
-            if output.len() > 1 {
-                match self.flag_color {
-                    When::Auto => output.printstd(),
-                    When::Never => try!(output.print(&mut io::stdout())),
-                    When::Always => output.print_tty(true),
+            if self.flag_merge {
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                for c in benches.comparisons() {
+                    let faster = if c.diff_ns > 0 {
+                        &c.old
+                    } else {
+                        &c.new
+                    };
+                    handle.write(faster.original.as_bytes())?;
+                    handle.write(b"\n")?;
                 }
             } else {
-                let comparisions = benches.comparisons().len();
-                let improvements = benches.comparisons().iter().filter(|c| c.diff_ns <= 0).count();
-                let regressions = comparisions - improvements;
+                let mut output = Table::new();
+                output.set_format(*format::consts::FORMAT_CLEAN);
+                output.add_row(row![
+                    b->"name",
+                    b->format!("{} ns/iter", name_old),
+                    b->format!("{} ns/iter", name_new),
+                    br->"diff ns/iter",
+                    br->"diff %",
+                    br->"speedup"
+                ]);
+                for c in benches.comparisons() {
+                    let abs_per = (c.diff_ratio * 100f64).abs().trunc() as u8;
+                    let regression = c.diff_ns > 0;
+                    if self.flag_threshold.map_or(false, |t| abs_per < t) ||
+                       self.flag_regressions && !regression ||
+                       self.flag_improvements && regression {
+                        continue;
+                    }
+                    output.add_row(c.to_row(self.flag_variance, regression));
+                }
 
-                match (self.flag_threshold, self.flag_improvements, self.flag_regressions) {
-                    (Some(threshold), false, false) => {
-                        eprintln!(
-                            "All ({}) benchmarks are within a {}% threshold",
-                            comparisions,
-                            threshold,
-                        )
+                if self.flag_include_missing {
+                    for b in benches.missing_old() {
+                        output.add_row(row![b.name, b.fmt_ns(self.flag_variance), "n/a", r->"n/a", r->"n/a"]);
                     }
-                    (Some(threshold), true, false) if improvements > 0 => {
-                        eprintln!(
-                            "All ({}/{}) improvements are within a {}% threshold",
-                            improvements,
-                            comparisions,
-                            threshold,
-                        )
+
+                    for b in benches.missing_new() {
+                        output.add_row(row![b.name, "n/a", b.fmt_ns(self.flag_variance), r->"n/a", r->"n/a"]);
                     }
-                    (_, true, false) => {
-                        eprintln!("{}/{} benchmarks improved", improvements, comparisions)
+                }
+
+                if output.len() > 1 {
+                    match self.flag_color {
+                        When::Auto => output.printstd(),
+                        When::Never => try!(output.print(&mut io::stdout())),
+                        When::Always => output.print_tty(true),
                     }
-                    (Some(threshold), false, true) if regressions > 0 => {
-                        eprintln!(
-                            "All ({}/{}) regressions are within a {}% threshold",
-                            regressions,
-                            comparisions,
-                            threshold,
-                        )
+                } else {
+                    let comparisions = benches.comparisons().len();
+                    let improvements = benches.comparisons().iter().filter(|c| c.diff_ns <= 0).count();
+                    let regressions = comparisions - improvements;
+
+                    match (self.flag_threshold, self.flag_improvements, self.flag_regressions) {
+                        (Some(threshold), false, false) => {
+                            eprintln!(
+                                "All ({}) benchmarks are within a {}% threshold",
+                                comparisions,
+                                threshold,
+                            )
+                        }
+                        (Some(threshold), true, false) if improvements > 0 => {
+                            eprintln!(
+                                "All ({}/{}) improvements are within a {}% threshold",
+                                improvements,
+                                comparisions,
+                                threshold,
+                            )
+                        }
+                        (_, true, false) => {
+                            eprintln!("{}/{} benchmarks improved", improvements, comparisions)
+                        }
+                        (Some(threshold), false, true) if regressions > 0 => {
+                            eprintln!(
+                                "All ({}/{}) regressions are within a {}% threshold",
+                                regressions,
+                                comparisions,
+                                threshold,
+                            )
+                        }
+                        (_, false, true) => {
+                            eprintln!("{}/{} benchmarks regressed", regressions, comparisions)
+                        }
+                        _ => eprintln!("WARNING: nothing to output"),
                     }
-                    (_, false, true) => {
-                        eprintln!("{}/{} benchmarks regressed", regressions, comparisions)
-                    }
-                    _ => eprintln!("WARNING: nothing to output"),
                 }
             }
         }

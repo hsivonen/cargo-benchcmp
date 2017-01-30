@@ -81,6 +81,7 @@ pub struct Benchmark {
     pub ns: u64,
     pub variance: u64,
     pub throughput: Option<u64>,
+    pub original: String,
 }
 
 impl Eq for Benchmark {}
@@ -135,6 +136,7 @@ impl FromStr for Benchmark {
             ns: ns,
             variance: variance,
             throughput: throughput,
+            original: line.to_string(),
         })
     }
 }
@@ -411,11 +413,14 @@ mod tests {
                     let size = g.gen_range(1, size);
                     g.gen_ascii_chars().take(size).collect()
                 };
+                let name_string: String = name;
+                let orig = name_string.to_string();
                 Benchmark {
-                    name: name,
+                    name: name_string,
                     ns: ns,
                     variance: variance,
                     throughput: throughput,
+                    original: orig,
                 }
             }
         }
